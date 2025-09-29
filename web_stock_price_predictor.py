@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from keras.models import load_model, Sequential
-from keras.layers import Dense, LSTM, Dropout
-from keras.callbacks import EarlyStopping
+from tensorflow.keras.models import load_model, Sequential
+from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
 import matplotlib.pyplot as plt
 import yfinance as yf
 from datetime import datetime
