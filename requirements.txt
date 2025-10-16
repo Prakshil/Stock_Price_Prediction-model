@@ -4,5 +4,4 @@ numpy>=1.26
 scikit-learn>=1.4
 yfinance>=0.2.43
 matplotlib>=3.8
-tensorflow-cpu==2.15.1
-# Optional: omit TensorFlow if deploying to an environment where it is unavailable (e.g., Snowflake Streamlit)
+# Optional: install TensorFlow manually (`pip install tensorflow-cpu==2.15.1`) when running locally with the LSTM backend
