@@ -1,15 +1,27 @@
+import warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
-from tensorflow.keras.models import load_model, Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
 import matplotlib.pyplot as plt
 import yfinance as yf
-from datetime import datetime
-from typing import List, Optional
 from pathlib import Path
+from typing import List, Optional, Tuple
 from sklearn.preprocessing import MinMaxScaler
+
+try:
+    from tensorflow.keras.models import load_model, Sequential
+    from tensorflow.keras.layers import Dense, LSTM, Dropout
+    from tensorflow.keras.callbacks import EarlyStopping
+    TF_AVAILABLE = True
+    TF_IMPORT_ERROR: Optional[BaseException] = None
+except Exception as exc:  # TensorFlow is not available on some hosts (e.g., Snowflake Streamlit)
+    TF_AVAILABLE = False
+    TF_IMPORT_ERROR = exc
+    load_model = Sequential = LSTM = Dropout = Dense = EarlyStopping = None  # type: ignore
+
+if not TF_AVAILABLE:
+    from sklearn.neural_network import MLPRegressor
+    import joblib
 
 # ------------------------------------------------------------
 # Beginner-friendly Streamlit app for Stock Price Prediction
@@ -25,6 +37,10 @@ st.title("Stock Price Predictor App")
 # Sidebar controls for beginner-friendly choices
 with st.sidebar:
     st.header("Settings")
+    if not TF_AVAILABLE:
+        st.warning("TensorFlow is not available in this environment. Using a lightweight scikit-learn fallback model.")
+        if TF_IMPORT_ERROR:
+            st.caption(f"TensorFlow import failed with: {TF_IMPORT_ERROR}")
     stock = st.text_input("Enter stock ticker (e.g., GOOG, AAPL, MSFT)", "GOOG")
     st.caption("Use Period + Interval to control how much data and at what granularity to download.")
 
@@ -40,7 +56,11 @@ with st.sidebar:
     st.divider()
     st.subheader("Training")
     train_epochs = st.slider("Training epochs (if training in app)", min_value=1, max_value=50, value=10, step=1)
-    train_now = st.checkbox("Train/Update model now (use these epochs)", value=False, help="If checked, trains a small LSTM now; otherwise loads saved model if available")
+    train_now = st.checkbox(
+        "Train/Update model now (use these epochs)",
+        value=False,
+        help="If checked, trains/updates a model now; otherwise loads saved model if available",
+    )
 
 # No auto-refresh; keep the app static for clarity
 
@@ -155,8 +175,25 @@ def make_sequences(scaled: np.ndarray, window: int):
         y.append(scaled[i])
     return np.array(X), np.array(y)
 
-def load_or_train_model(model_path: Path, x_train: np.ndarray, y_train: np.ndarray, window: int, epochs: int, force_train: bool = False):
-    # Try to load an existing model
+
+def predict_sequences(model: object, backend: str, features: np.ndarray, verbose: int = 0) -> np.ndarray:
+    if backend == "tensorflow":
+        return model.predict(features, verbose=verbose)
+    flat = features.reshape(features.shape[0], -1)
+    preds = model.predict(flat)
+    return preds.reshape(-1, 1)
+
+def _load_or_train_tf_model(
+    model_path: Path,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    window: int,
+    epochs: int,
+    force_train: bool,
+) -> Tuple[object, bool]:
+    if not TF_AVAILABLE:
+        raise RuntimeError("TensorFlow backend is not available.")
+
     if not force_train:
         try:
             if model_path.exists():
@@ -165,28 +202,81 @@ def load_or_train_model(model_path: Path, x_train: np.ndarray, y_train: np.ndarr
         except Exception:
             pass
 
-    # Train a small fallback model quickly
     model = Sequential([
         LSTM(32, return_sequences=True, input_shape=(window, 1)),
         Dropout(0.1),
         LSTM(16, return_sequences=False),
         Dense(8, activation='relu'),
-        Dense(1)
+        Dense(1),
     ])
     model.compile(optimizer='adam', loss='mean_squared_error')
     callbacks = [EarlyStopping(monitor='loss', patience=3, restore_best_weights=True)]
     try:
         model.fit(x_train, y_train, batch_size=32, epochs=epochs, verbose=0, validation_split=0.1, callbacks=callbacks)
     except Exception:
-        model.fit(x_train, y_train, batch_size=1, epochs=max(2, epochs//2), verbose=0)
+        model.fit(x_train, y_train, batch_size=1, epochs=max(2, epochs // 2), verbose=0)
 
-    # Try to save for next time
     try:
         model.save(str(model_path))
-        st.success(f"Trained a quick model and saved to {model_path.name}")
+        st.success(f"Trained a quick TensorFlow model and saved to {model_path.name}")
     except Exception:
-        st.info("Trained a quick model in memory (saving skipped).")
+        st.info("Trained a quick TensorFlow model in memory (saving skipped).")
     return model, False
+
+
+def _load_or_train_mlp_model(
+    model_path: Path,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    window: int,
+    epochs: int,
+    force_train: bool,
+) -> Tuple[object, bool]:
+    model_file = model_path.with_suffix(".joblib")
+
+    if not force_train and model_file.exists():
+        try:
+            model = joblib.load(model_file)
+            return model, True
+        except Exception:
+            pass
+
+    # Flatten sequences for the MLP regressor
+    flat_x = x_train.reshape(x_train.shape[0], -1)
+    flat_y = y_train.reshape(-1)
+    mlp = MLPRegressor(
+        hidden_layer_sizes=(64, 32),
+        activation="relu",
+        max_iter=max(200, epochs * 50),
+        random_state=42,
+        learning_rate="adaptive",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mlp.fit(flat_x, flat_y)
+
+    try:
+        joblib.dump(mlp, model_file)
+        st.success(f"Trained fallback MLP model and saved to {model_file.name}")
+    except Exception:
+        st.info("Trained fallback MLP model in memory (saving skipped).")
+    return mlp, False
+
+
+def load_or_train_model(
+    model_path: Path,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    window: int,
+    epochs: int,
+    force_train: bool = False,
+) -> Tuple[object, bool, str]:
+    if TF_AVAILABLE:
+        model, loaded = _load_or_train_tf_model(model_path, x_train, y_train, window, epochs, force_train)
+        return model, loaded, "tensorflow"
+
+    model, loaded = _load_or_train_mlp_model(model_path, x_train, y_train, window, epochs, force_train)
+    return model, loaded, "mlp"
 
 # Helper: plot moving averages alongside price
 def plot_ma(df: pd.DataFrame, col: str, ma_days: List[int]):
@@ -229,10 +319,20 @@ x_train, y_train = X[:split_idx], Y[:split_idx]
 x_test, y_test = X[split_idx:], Y[split_idx:]
 
 model_path = Path("Latest_stock_price_model.keras")
-model, loaded_from_disk = load_or_train_model(model_path, x_train, y_train, window, epochs=train_epochs, force_train=train_now)
+model, loaded_from_disk, backend = load_or_train_model(
+    model_path,
+    x_train,
+    y_train,
+    window,
+    epochs=train_epochs,
+    force_train=train_now,
+)
+
+if backend == "mlp":
+    st.caption("Running with scikit-learn MLP fallback model (no TensorFlow dependency).")
 
 # Predict and inverse transform
-pred_scaled = model.predict(x_test)
+pred_scaled = predict_sequences(model, backend, x_test)
 inv_pred = scaler.inverse_transform(pred_scaled)
 inv_y = scaler.inverse_transform(y_test)
 
@@ -278,7 +378,7 @@ if forecast_days and forecast_days > 0:
         future_scaled = []
         for _ in range(forecast_days):
             x_input = last_window.reshape(1, last_window.shape[0], 1)
-            next_scaled = model.predict(x_input, verbose=0)[0, 0]
+            next_scaled = predict_sequences(model, backend, x_input, verbose=0)[0, 0]
             future_scaled.append(next_scaled)
             last_window = np.vstack([last_window[1:], [[next_scaled]]])
         future_prices = scaler.inverse_transform(np.array(future_scaled).reshape(-1, 1)).flatten()

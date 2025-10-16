@@ -15,6 +15,8 @@ This project contains:
    - tensorflow (or keras for TF backend)
    - streamlit
 
+   *Snowflake Streamlit note:* TensorFlow is not currently available in the Snowflake package repository. The app now detects this automatically and falls back to a lightweight scikit-learn multilayer perceptron for predictions. To use that path, omit TensorFlow from your Snowflake package list.
+
 2. Open and run the notebook `stock_price.ipynb` to:
    - Download data
    - Train the LSTM model
