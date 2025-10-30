@@ -1,2 +1,14 @@
 .venv/
-runtime.txt
+venv/
+__pycache__/
+*.pyc
+
+# Model artifacts
+*.joblib
+*.keras
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
