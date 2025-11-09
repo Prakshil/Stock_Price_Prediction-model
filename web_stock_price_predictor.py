@@ -2,167 +2,188 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from typing import Optional
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
 
-"""
-Beginner-friendly Streamlit app (no deep learning)
-- Downloads daily data with yfinance
-- Creates simple lag features (previous N closes)
-- Trains a Linear Regression model
-- Shows test metrics (RMSE, MAE, MAPE) and a simple next-day prediction
-"""
-
-st.title("Beginner Stock Price Predictor (Regression)")
-
-# Sidebar controls for beginner-friendly choices
-with st.sidebar:
-    st.header("Settings")
-    stock = st.text_input("Stock ticker", "GOOG")
-    period = st.selectbox("History period", ["6mo", "1y", "2y", "5y"], index=1)
-    lags = st.slider("Lag features (days)", 1, 30, 5, help="How many previous days to use as input")
-    test_size_pct = st.slider("Test size % (most recent)", 10, 50, 20)
-
-# No auto-refresh; keep the app static for clarity
-
-@st.cache_data(show_spinner=False, ttl=60)
-def load_data(ticker: str, period: str) -> pd.DataFrame:
-    """Download daily OHLCV data from yfinance and flatten columns if needed."""
-    df = yf.download(ticker, period=period, interval="1d")
-    if df is None or df.empty:
-        return pd.DataFrame()
-    # If MultiIndex columns (can happen depending on yfinance settings), flatten them
+# ======================
+# Helpers (define FIRST)
+# ======================
+def _get_price_series(df: pd.DataFrame) -> pd.Series:
+    """Return a 1-D price series from a yfinance DataFrame (robust to MultiIndex/1-col)."""
+    # MultiIndex (e.g., ('Close','AAPL'))
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [" ".join([str(x) for x in col if x is not None]).strip() for col in df.columns.values]
-    return df
-data = load_data(stock, period)
+        for name in ["Adj Close", "Close"]:
+            candidates = [c for c in df.columns if isinstance(c, tuple) and name in c]
+            if candidates:
+                s = df[candidates[0]]
+                if isinstance(s, pd.DataFrame):
+                    s = s.iloc[:, 0]
+                s = pd.to_numeric(s.squeeze(), errors="coerce")
+                s.name = "Price"
+                return s
 
-if data.empty:
-    st.error("No data found. Please check the ticker symbol or try a different date range.")
-    st.stop()
+    # Normal single index
+    for name in ["Adj Close", "Close", "AdjClose", "close", "adjclose"]:
+        if name in df.columns:
+            s = df[name]
+            if isinstance(s, pd.DataFrame):
+                s = s.iloc[:, 0]
+            s = pd.to_numeric(s.squeeze(), errors="coerce")
+            s.name = "Price"
+            return s
 
-def resolve_price_column(df: pd.DataFrame) -> Optional[str]:
-    """Choose a reasonable price column with robust matching.
+    # Fallback
+    s = df.select_dtypes(include=[np.number]).iloc[:, 0]
+    s = pd.to_numeric(s.squeeze(), errors="coerce")
+    s.name = "Price"
+    return s
 
-    Preference order:
-      1) 'Adj Close' (any case/spacing variant)
-      2) 'Close' (any case/spacing variant)
-      3) any column containing 'close'
-      4) first numeric column
-    """
-    cols = [str(c) for c in df.columns]
-    lower_map = {str(c).lower(): str(c) for c in cols}
+def _ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
 
-    # helpers
-    def find_exact(name: str) -> Optional[str]:
-        key = name.lower()
-        if key in lower_map:
-            return lower_map[key]
-        return None
+def _macd_features(series: pd.Series) -> pd.DataFrame:
+    """MACD, signal, hist — lagged by 1 to avoid look-ahead."""
+    ema12 = _ema(series, 12)
+    ema26 = _ema(series, 26)
+    macd = ema12 - ema26
+    signal = _ema(macd, 9)
+    hist = macd - signal
+    return pd.DataFrame({
+        "macd_1": macd.shift(1),
+        "macd_signal_1": signal.shift(1),
+        "macd_hist_1": hist.shift(1),
+    }, index=series.index)
 
-    def find_contains(piece: str) -> Optional[str]:
-        piece_l = piece.lower()
-        for lc, orig in lower_map.items():
-            if piece_l in lc:
-                return orig
-        return None
-
-    # 1) Adj Close variants
-    for candidate in ["adj close", "adj_close", "adjclose"]:
-        exact = find_exact(candidate)
-        if exact:
-            return exact
-    contains_adj_close = None
-    for piece in ["adj close", "adj_close", "adjclose"]:
-        contains_adj_close = find_contains(piece)
-        if contains_adj_close:
-            return contains_adj_close
-
-    # 2) Close variants
-    for candidate in ["close"]:
-        exact = find_exact(candidate)
-        if exact:
-            return exact
-    contains_close = find_contains("close")
-    if contains_close:
-        return contains_close
-
-    # 3) first numeric column fallback
-    for c in df.columns:
-        s = df[c]
-        if pd.api.types.is_numeric_dtype(s):
-            return str(c)
-    return None
-
-price_col = resolve_price_column(data)
-if price_col is None:
-    st.error("Could not find a usable price column in the downloaded data.")
-    st.write({"columns": list(map(str, data.columns))})
-    st.dataframe(data.head())
-    st.stop()
-elif price_col not in ("Adj Close", "Close"):
-    st.info(f"Using column '{price_col}' as price (fallback)")
-
-st.caption("Method: use previous N closing prices as inputs to predict the next close using Linear Regression.")
-
-st.subheader(f"{stock} {price_col}")
-st.line_chart(data[[price_col]])
-
-# --- Model helpers ---
-def make_supervised(series: pd.Series, lags: int) -> pd.DataFrame:
-    df = pd.DataFrame({"target": series})
+def build_features(df: pd.DataFrame, lags: int = 3) -> pd.DataFrame:
+    """Create lag features + MACD features + target."""
+    series = _get_price_series(df)
+    out = pd.DataFrame(index=series.index)
+    # price lags
     for i in range(1, lags + 1):
-        df[f"lag_{i}"] = series.shift(i)
-    df = df.dropna()
-    return df
+        out[f"lag_{i}"] = series.shift(i)
+    # MACD block
+    out = out.join(_macd_features(series))
+    # target
+    out["target"] = series
+    out.dropna(inplace=True)
+    return out
 
-series = data[price_col].astype(float)
-supervised = make_supervised(series, lags)
-if supervised.empty or len(supervised) < 10:
-    st.warning("Not enough data after creating lag features. Increase period or reduce lags.")
+# ======================
+# Streamlit setup
+# ======================
+st.set_page_config(page_title="Enhanced Stock Price Predictor", layout="wide")
+st.title("📈 Enhanced Stock Price Prediction App")
+
+# Sidebar controls
+st.sidebar.header("Configuration")
+ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, RELIANCE.NS)", "AAPL")
+period = st.sidebar.selectbox("Select Period", ["1y", "2y", "5y", "10y"], index=0)
+lag_days = st.sidebar.slider("Number of Lag Days", 1, 10, 3)
+test_size = st.sidebar.slider("Test Size (%)", 10, 50, 20)
+model_choice = st.sidebar.selectbox(
+    "Choose Model",
+    ["Linear Regression", "Random Forest", "Gradient Boosting"],
+    index=0
+)
+compare_all = st.sidebar.checkbox("Compare All Models", value=False)
+
+# ======================
+# Data loader
+# ======================
+@st.cache_data(show_spinner=False)
+def load_data(ticker: str, period: str) -> pd.DataFrame:
+    df = yf.download(ticker, period=period)
+    return df.dropna()
+
+data = load_data(ticker, period)
+if data.empty:
+    st.error("Failed to fetch data. Please check the ticker symbol.")
     st.stop()
 
-test_size = max(1, int(len(supervised) * (test_size_pct / 100.0)))
-train = supervised.iloc[:-test_size]
-test = supervised.iloc[-test_size:]
+# ======================
+# Chart
+# ======================
+price_series = _get_price_series(data)
+st.subheader(f"Stock Data for {ticker}")
+st.line_chart(pd.DataFrame({"Price": price_series}))
 
-X_train = train.drop(columns=["target"]).values
-y_train = train["target"].values
-X_test = test.drop(columns=["target"]).values
-y_test = test["target"].values
+# ======================
+# Features & split
+# ======================
+df_feat = build_features(data, lag_days)
 
-model = LinearRegression()
-model.fit(X_train, y_train)
+split_idx = int(len(df_feat) * (1 - test_size / 100))
+X_train = df_feat.drop("target", axis=1).iloc[:split_idx]
+X_test  = df_feat.drop("target", axis=1).iloc[split_idx:]
+y_train = df_feat["target"].iloc[:split_idx]
+y_test  = df_feat["target"].iloc[split_idx:]
 
-# Predict and inverse transform
-pred = model.predict(X_test)
+# ======================
+# Models
+# ======================
+MODELS = {
+    "Linear Regression": LinearRegression(),
+    "Random Forest": RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=42, n_jobs=-1),
+    "Gradient Boosting": HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=500),
+}
 
-# Compute metrics: RMSE, MAE, MAPE
-rmse = float(np.sqrt(mean_squared_error(y_test, pred)))
-mae = float(mean_absolute_error(y_test, pred))
-with np.errstate(divide='ignore', invalid='ignore'):
-    mape_vals = np.abs((pred - y_test) / np.where(y_test == 0, np.nan, y_test)) * 100.0
-    mape = float(np.nanmean(mape_vals))
-cols = st.columns(3)
-cols[0].metric("RMSE", f"{rmse:,.2f}")
-cols[1].metric("MAE", f"{mae:,.2f}")
-cols[2].metric("MAPE %", f"{mape:,.2f}")
+def evaluate_model(name, model):
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
+    mae  = float(mean_absolute_error(y_test, preds))
+    mape = float(np.mean(np.abs((y_test - preds) / y_test)) * 100)
+    accuracy = 100 - mape  # accuracy-like score derived from MAPE
+    return {
+        "Model": name,
+        "RMSE": rmse,
+        "MAE": mae,
+        "MAPE": mape,
+        "Accuracy (%)": accuracy,
+        "Predictions": preds
+    }
 
-# Build a DataFrame aligned to original index for plotting
-plot_df = pd.DataFrame({
-    "Actual": y_test,
-    "Predicted": pred,
-}, index=test.index)
+results = []
+if compare_all:
+    for n, m in MODELS.items():
+        results.append(evaluate_model(n, m))
+else:
+    results.append(evaluate_model(model_choice, MODELS[model_choice]))
 
-st.subheader("Actual vs Predicted (test set)")
-st.line_chart(plot_df)
+# Leaderboard
+st.subheader("📊 Model Performance Comparison")
+metrics_df = pd.DataFrame([{k: v for k, v in r.items() if k != "Predictions"} for r in results])
+st.dataframe(metrics_df.style.highlight_min(subset=["RMSE", "MAE", "MAPE"], color="lightgreen"))
 
-# Simple next-day prediction using latest lags
-st.subheader("Next day prediction (naive)")
-latest_lags = []
-for i in range(1, lags + 1):
-    latest_lags.append(series.iloc[-i])
-latest_X = np.array(latest_lags).reshape(1, -1)
-next_day_pred = float(model.predict(latest_X)[0])
-st.metric("Predicted next close", f"{next_day_pred:,.2f}")
+# Best model & plots
+best = min(results, key=lambda x: x["RMSE"])
+best_preds = best["Predictions"]
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.plot(y_test.index, y_test, label="Actual", linewidth=2)
+ax.plot(y_test.index, best_preds, label=f"Predicted ({best['Model']})", linestyle="--")
+ax.set_title(f"Actual vs Predicted ({ticker})")
+ax.legend()
+st.pyplot(fig)
+
+# Residuals
+residuals = y_test - best_preds
+fig2, ax2 = plt.subplots(figsize=(10, 4))
+ax2.plot(y_test.index, residuals, label="Residuals")
+ax2.axhline(0, color="red", linestyle="--")
+ax2.set_title("Residual Plot")
+ax2.legend()
+st.pyplot(fig2)
+
+# Next-day prediction & accuracy display
+latest_X = df_feat.drop("target", axis=1).iloc[-1:].values
+next_day_pred = MODELS[best["Model"]].predict(latest_X)[0]
+st.metric(label="Next Day Predicted Price", value=f"${next_day_pred:.2f}")
+st.metric(label="Model Accuracy", value=f"{best['Accuracy (%)']:.2f}%")
+
+# Export CSV
+pred_df = pd.DataFrame({"Date": y_test.index, "Actual": y_test.values, "Predicted": best_preds})
+csv = pred_df.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download Predictions (CSV)", csv, f"{ticker}_predictions.csv", "text/csv")
