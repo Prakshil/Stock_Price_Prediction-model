@@ -3,13 +3,12 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 
-# ======================
-# Helpers (define FIRST)
-# ======================
+
 def _get_price_series(df: pd.DataFrame) -> pd.Series:
     """Return a 1-D price series from a yfinance DataFrame (robust to MultiIndex/1-col)."""
     # MultiIndex (e.g., ('Close','AAPL'))
@@ -24,7 +23,6 @@ def _get_price_series(df: pd.DataFrame) -> pd.Series:
                 s.name = "Price"
                 return s
 
-    # Normal single index
     for name in ["Adj Close", "Close", "AdjClose", "close", "adjclose"]:
         if name in df.columns:
             s = df[name]
@@ -34,7 +32,6 @@ def _get_price_series(df: pd.DataFrame) -> pd.Series:
             s.name = "Price"
             return s
 
-    # Fallback
     s = df.select_dtypes(include=[np.number]).iloc[:, 0]
     s = pd.to_numeric(s.squeeze(), errors="coerce")
     s.name = "Price"
@@ -70,28 +67,24 @@ def build_features(df: pd.DataFrame, lags: int = 3) -> pd.DataFrame:
     out.dropna(inplace=True)
     return out
 
-# ======================
-# Streamlit setup
-# ======================
-st.set_page_config(page_title="Enhanced Stock Price Predictor", layout="wide")
-st.title("📈 Enhanced Stock Price Prediction App")
 
-# Sidebar controls
-st.sidebar.header("Configuration")
+st.set_page_config(page_title="Stock Price Predictor", layout="wide")
+st.title("📈 Stock Price Prediction App")
+
+
+st.sidebar.header("⚙️ Configuration")
 ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, RELIANCE.NS)", "AAPL")
 period = st.sidebar.selectbox("Select Period", ["1y", "2y", "5y", "10y"], index=0)
 lag_days = st.sidebar.slider("Number of Lag Days", 1, 10, 3)
 test_size = st.sidebar.slider("Test Size (%)", 10, 50, 20)
+
+st.sidebar.header("🤖 Model Selection")
 model_choice = st.sidebar.selectbox(
     "Choose Model",
-    ["Linear Regression", "Random Forest", "Gradient Boosting"],
-    index=0
+    ["Linear Regression", "Random Forest", "Gradient Boosting", "Compare All Models"]
 )
-compare_all = st.sidebar.checkbox("Compare All Models", value=False)
 
-# ======================
-# Data loader
-# ======================
+
 @st.cache_data(show_spinner=False)
 def load_data(ticker: str, period: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period)
@@ -102,16 +95,24 @@ if data.empty:
     st.error("Failed to fetch data. Please check the ticker symbol.")
     st.stop()
 
-# ======================
-# Chart
-# ======================
 price_series = _get_price_series(data)
-st.subheader(f"Stock Data for {ticker}")
+
+# Display current and previous day prices
+st.subheader(f"📊 Current Stock Information for {ticker}")
+col1, col2, col3 = st.columns(3)
+current_price = float(price_series.iloc[-1])
+previous_price = float(price_series.iloc[-2]) if len(price_series) > 1 else current_price
+price_change = current_price - previous_price
+price_change_pct = (price_change / previous_price) * 100 if previous_price != 0 else 0
+
+col1.metric("Current Price", f"${current_price:.2f}", f"{price_change:+.2f} ({price_change_pct:+.2f}%)")
+col2.metric("Previous Day Close", f"${previous_price:.2f}")
+col3.metric("Last Updated", data.index[-1].strftime("%Y-%m-%d"))
+
+st.subheader(f"📈 Historical Price Chart")
 st.line_chart(pd.DataFrame({"Price": price_series}))
 
-# ======================
-# Features & split
-# ======================
+
 df_feat = build_features(data, lag_days)
 
 split_idx = int(len(df_feat) * (1 - test_size / 100))
@@ -120,70 +121,224 @@ X_test  = df_feat.drop("target", axis=1).iloc[split_idx:]
 y_train = df_feat["target"].iloc[:split_idx]
 y_test  = df_feat["target"].iloc[split_idx:]
 
-# ======================
-# Models
-# ======================
-MODELS = {
-    "Linear Regression": LinearRegression(),
-    "Random Forest": RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=42, n_jobs=-1),
-    "Gradient Boosting": HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=500),
-}
+# Scale features for tree-based models
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-def evaluate_model(name, model):
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
+
+def train_and_evaluate_model(model_name: str, X_train, X_test, y_train, y_test, use_scaling=False):
+    """Train a model and return predictions and metrics."""
+    if model_name == "Linear Regression":
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+    elif model_name == "Random Forest":
+        model = RandomForestRegressor(
+            n_estimators=300,
+            max_depth=15,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            bootstrap=True,
+            random_state=42,
+            n_jobs=-1,
+            oob_score=True
+        )
+        X_tr = X_train_scaled if use_scaling else X_train
+        X_ts = X_test_scaled if use_scaling else X_test
+        model.fit(X_tr, y_train)
+        preds = model.predict(X_ts)
+    elif model_name == "Gradient Boosting":
+        model = GradientBoostingRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=4,
+            min_samples_split=5,
+            min_samples_leaf=3,
+            subsample=0.8,
+            max_features='sqrt',
+            random_state=42,
+            validation_fraction=0.1,
+            n_iter_no_change=10,
+            tol=1e-4
+        )
+        X_tr = X_train_scaled if use_scaling else X_train
+        X_ts = X_test_scaled if use_scaling else X_test
+        model.fit(X_tr, y_train)
+        preds = model.predict(X_ts)
+    
+    # Calculate metrics
     rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
-    mae  = float(mean_absolute_error(y_test, preds))
-    mape = float(np.mean(np.abs((y_test - preds) / y_test)) * 100)
-    accuracy = 100 - mape  # accuracy-like score derived from MAPE
-    return {
-        "Model": name,
+    mae = float(mean_absolute_error(y_test, preds))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mape_vals = np.abs((preds - y_test) / np.where(y_test == 0, np.nan, y_test)) * 100.0
+        mape = float(np.nanmean(mape_vals))
+    accuracy = 100 - mape
+    r2 = r2_score(y_test, preds)
+    
+    return model, preds, {
         "RMSE": rmse,
         "MAE": mae,
         "MAPE": mape,
-        "Accuracy (%)": accuracy,
-        "Predictions": preds
+        "Accuracy": accuracy,
+        "R² Score": r2
     }
 
-results = []
-if compare_all:
-    for n, m in MODELS.items():
-        results.append(evaluate_model(n, m))
+
+if model_choice == "Compare All Models":
+    st.subheader("🔬 Model Comparison")
+    
+    models_data = {}
+    all_results = []
+    
+    with st.spinner("Training all models..."):
+        for name in ["Linear Regression", "Random Forest", "Gradient Boosting"]:
+            use_scaling = name != "Linear Regression"
+            model, preds, metrics = train_and_evaluate_model(
+                name, X_train, X_test, y_train, y_test, use_scaling
+            )
+            models_data[name] = {"model": model, "predictions": preds, "metrics": metrics}
+            all_results.append({"Model": name, **metrics})
+    
+    # Display comparison table
+    st.subheader("📊 Performance Comparison")
+    comparison_df = pd.DataFrame(all_results)
+    st.dataframe(comparison_df.style.highlight_min(subset=["RMSE", "MAE", "MAPE"], color="lightgreen")
+                                    .highlight_max(subset=["Accuracy", "R² Score"], color="lightgreen"))
+    
+    # Find best model
+    best_model_name = min(all_results, key=lambda x: x["RMSE"])["Model"]
+    st.success(f"🏆 Best Model: **{best_model_name}** (Lowest RMSE)")
+    
+    # Plot all predictions
+    st.subheader("📈 Visual Comparison: Actual vs Predicted")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(y_test.index, y_test, label="Actual", linewidth=2.5, color='black', alpha=0.8)
+    
+    colors = ['blue', 'green', 'orange']
+    linestyles = ['--', '-.', ':']
+    
+    for i, (name, data) in enumerate(models_data.items()):
+        ax.plot(y_test.index, data["predictions"], 
+                label=f"{name} (RMSE: {data['metrics']['RMSE']:.2f})",
+                linestyle=linestyles[i], 
+                linewidth=1.5,
+                color=colors[i],
+                alpha=0.7)
+    
+    ax.set_title(f"Model Comparison for {ticker}", fontsize=14, fontweight='bold')
+    ax.set_xlabel("Date", fontsize=12)
+    ax.set_ylabel("Price", fontsize=12)
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Next-day predictions from all models
+    st.subheader("🔮 Next-Day Predictions")
+    latest_X = df_feat.drop("target", axis=1).iloc[-1:].values
+    latest_X_scaled = scaler.transform(latest_X)
+    
+    pred_cols = st.columns(3)
+    for i, (name, data) in enumerate(models_data.items()):
+        if name == "Linear Regression":
+            next_pred = data["model"].predict(latest_X)[0]
+        else:
+            next_pred = data["model"].predict(latest_X_scaled)[0]
+        pred_cols[i].metric(f"{name}", f"${next_pred:.2f}")
+    
+    # Recommended prediction
+    best_model = models_data[best_model_name]["model"]
+    if best_model_name == "Linear Regression":
+        recommended = best_model.predict(latest_X)[0]
+    else:
+        recommended = best_model.predict(latest_X_scaled)[0]
+    st.success(f"🎯 **Recommended Prediction (Best Model):** ${recommended:.2f}")
+
 else:
-    results.append(evaluate_model(model_choice, MODELS[model_choice]))
-
-# Leaderboard
-st.subheader("📊 Model Performance Comparison")
-metrics_df = pd.DataFrame([{k: v for k, v in r.items() if k != "Predictions"} for r in results])
-st.dataframe(metrics_df.style.highlight_min(subset=["RMSE", "MAE", "MAPE"], color="lightgreen"))
-
-# Best model & plots
-best = min(results, key=lambda x: x["RMSE"])
-best_preds = best["Predictions"]
-
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(y_test.index, y_test, label="Actual", linewidth=2)
-ax.plot(y_test.index, best_preds, label=f"Predicted ({best['Model']})", linestyle="--")
-ax.set_title(f"Actual vs Predicted ({ticker})")
-ax.legend()
-st.pyplot(fig)
-
-# Residuals
-residuals = y_test - best_preds
-fig2, ax2 = plt.subplots(figsize=(10, 4))
-ax2.plot(y_test.index, residuals, label="Residuals")
-ax2.axhline(0, color="red", linestyle="--")
-ax2.set_title("Residual Plot")
-ax2.legend()
-st.pyplot(fig2)
-
-# Next-day prediction & accuracy display
-latest_X = df_feat.drop("target", axis=1).iloc[-1:].values
-next_day_pred = MODELS[best["Model"]].predict(latest_X)[0]
-st.metric(label="Next Day Predicted Price", value=f"${next_day_pred:.2f}")
-st.metric(label="Model Accuracy", value=f"{best['Accuracy (%)']:.2f}%")
-
-# Export CSV
-pred_df = pd.DataFrame({"Date": y_test.index, "Actual": y_test.values, "Predicted": best_preds})
-csv = pred_df.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download Predictions (CSV)", csv, f"{ticker}_predictions.csv", "text/csv")
+    # Single model mode
+    st.subheader(f"🤖 Model: {model_choice}")
+    
+    use_scaling = model_choice != "Linear Regression"
+    with st.spinner(f"Training {model_choice}..."):
+        model, preds, metrics = train_and_evaluate_model(
+            model_choice, X_train, X_test, y_train, y_test, use_scaling
+        )
+    
+    # Display metrics
+    st.subheader("📊 Model Performance")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("RMSE", f"{metrics['RMSE']:.4f}")
+    col2.metric("MAE", f"{metrics['MAE']:.4f}")
+    col3.metric("MAPE", f"{metrics['MAPE']:.2f}%")
+    col4.metric("Accuracy", f"{metrics['Accuracy']:.2f}%")
+    col5.metric("R² Score", f"{metrics['R² Score']:.4f}")
+    
+    # Actual vs Predicted plot
+    st.subheader("📈 Actual vs Predicted")
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(y_test.index, y_test, label="Actual", linewidth=2, color='black')
+    ax.plot(y_test.index, preds, label=f"Predicted ({model_choice})", linestyle="--", linewidth=2)
+    ax.set_title(f"Actual vs Predicted - {ticker} ({model_choice})")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Residuals plot
+    st.subheader("📉 Residual Analysis")
+    residuals = y_test - preds
+    fig2, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    axes[0].plot(y_test.index, residuals, color='red', alpha=0.6)
+    axes[0].axhline(0, color='black', linestyle='--', linewidth=1.5)
+    axes[0].set_title("Residuals Over Time")
+    axes[0].set_xlabel("Date")
+    axes[0].set_ylabel("Residual")
+    axes[0].grid(True, alpha=0.3)
+    
+    axes[1].hist(residuals, bins=30, color='steelblue', alpha=0.7, edgecolor='black')
+    axes[1].axvline(0, color='red', linestyle='--', linewidth=2)
+    axes[1].set_title("Residual Distribution")
+    axes[1].set_xlabel("Residual")
+    axes[1].set_ylabel("Frequency")
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    st.pyplot(fig2)
+    
+    # Next-day prediction
+    st.subheader("🔮 Next-Day Price Prediction")
+    latest_X = df_feat.drop("target", axis=1).iloc[-1:].values
+    if use_scaling:
+        latest_X_scaled = scaler.transform(latest_X)
+        next_day_pred = model.predict(latest_X_scaled)[0]
+    else:
+        next_day_pred = model.predict(latest_X)[0]
+    
+    pred_change = next_day_pred - current_price
+    pred_change_pct = (pred_change / current_price) * 100
+    
+    st.metric(
+        label=f"Predicted Next Day Price ({model_choice})", 
+        value=f"${next_day_pred:.2f}",
+        delta=f"{pred_change:+.2f} ({pred_change_pct:+.2f}%)"
+    )
+    
+    # Export CSV
+    pred_df = pd.DataFrame({
+        "Date": y_test.index, 
+        "Actual": y_test.values, 
+        "Predicted": preds,
+        "Residual": residuals
+    })
+    csv = pred_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download Predictions (CSV)", 
+        csv, 
+        f"{ticker}_{model_choice.replace(' ', '_')}_predictions.csv", 
+        "text/csv"
+    )
