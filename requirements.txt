@@ -4,4 +4,5 @@ numpy>=1.26
 scikit-learn>=1.4
 yfinance>=0.2.43
 matplotlib>=3.8
+xgboost>=1.7.6
 # Optional: install TensorFlow manually (`pip install tensorflow-cpu==2.15.1`) when running locally with the LSTM backend

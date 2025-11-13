@@ -34,6 +34,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import yfinance as yf
 from datetime import datetime, timedelta
+from xgboost import XGBRegressor
+from sklearn.svm import SVR
 ```
 
 ### Breakdown:
@@ -77,6 +79,21 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 - Date manipulation for default date ranges.
 - `datetime.now()`: Current date/time.
 - `timedelta(days=365)`: Duration object for arithmetic.
+
+#### New Imports:
+```python
+from xgboost import XGBRegressor
+from sklearn.svm import SVR
+```
+- **XGBRegressor:**
+  - Class from xgboost library.
+  - Implements extreme gradient boosting for regression.
+  - Requires: `pip install xgboost`.
+
+- **SVR (Support Vector Regressor):**
+  - Part of scikit-learn (`sklearn.svm`).
+  - SVM variant for continuous prediction.
+  - Already included in scikit-learn (no extra install).
 
 ---
 
@@ -148,6 +165,29 @@ def train_model(X_train, y_train, model_name, use_scaling=True):
             n_iter_no_change=10,
             tol=1e-4
         )
+    elif model_name == "XGBoost":
+        model = XGBRegressor(
+            n_estimators=200,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=3,
+            gamma=0,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0
+        )
+    elif model_name == "SVM":
+        model = SVR(
+            kernel='rbf',
+            C=100,
+            gamma='scale',
+            epsilon=0.1,
+            cache_size=500
+        )
     
     model.fit(X_train_scaled, y_train)
     return model, scaler
@@ -215,6 +255,41 @@ elif model_name == "Gradient Boosting":
     )
 ```
 - Identical to notebook configuration.
+
+**XGBoost block:**
+```python
+elif model_name == "XGBoost":
+    model = XGBRegressor(
+        n_estimators=200,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=3,
+        gamma=0,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+```
+- New model option.
+- Reasonable default hyperparameters.
+
+**SVM block:**
+```python
+elif model_name == "SVM":
+    model = SVR(
+        kernel='rbf',
+        C=100,
+        gamma='scale',
+        epsilon=0.1,
+        cache_size=500
+    )
+```
+- New model option.
+- Reasonable default hyperparameters.
 
 #### Train model:
 ```python
@@ -566,4 +641,358 @@ if df is None or df.empty:
 - Emoji `❌` for visual emphasis.
 
 #### `st.stop()`
--
+- Stops execution of the script.
+- Prevents downstream errors from empty `df`.
+
+---
+
+### Data Preparation: Feature Engineering
+
+```python
+st.subheader("Feature Engineering")
+
+# Lag features
+with st.spinner("Creating lag features..."):
+    df_lags = make_supervised(df["Close"], lags)
+    df_lags_train = df_lags[df_lags.index < split_date]
+    df_lags_test = df_lags[df_lags.index >= split_date]
+```
+
+#### `st.subheader(...)`
+- Smaller header within main section.
+
+#### Lag feature creation:
+```python
+with st.spinner("Creating lag features..."):
+    df_lags = make_supervised(df["Close"], lags)
+```
+- Shows spinner with custom message.
+- Calls `make_supervised` function for target column (`df["Close"]`).
+- `lags` variable from user input.
+
+---
+
+### Data Preview
+
+```python
+st.subheader("Data Preview")
+st.write(df.tail())
+
+st.subheader("Lagged Data Preview")
+st.write(df_lags.tail())
+```
+
+#### `st.write(...)`
+- Displays DataFrame as table.
+
+---
+
+### Model Training Section
+
+```python
+if mode == "Single Model":
+    with st.spinner(f"Training {selected_model}..."):
+        model, scaler = train_model(X_train, y_train, selected_model, use_scaling=True)
+```
+
+#### Conditional training:
+```python
+if mode == "Single Model":
+```
+- Only executes if "Single Model" selected.
+
+#### Training spinner:
+```python
+with st.spinner(f"Training {selected_model}..."):
+```
+- Dynamic message using f-string.
+
+#### Model training:
+```python
+model, scaler = train_model(X_train, y_train, selected_model, use_scaling=True)
+```
+- Calls `train_model` function with user-selected model.
+
+---
+
+### Model Comparison (if applicable)
+
+```python
+else:
+    st.subheader("Model Comparison")
+    all_models = ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", "SVM"]
+    metrics = ["rmse", "mae", "mape", "accuracy", "r2"]
+    results = pd.DataFrame(columns=["Model"] + metrics)
+    
+    for model_name in all_models:
+        with st.spinner(f"Training {model_name}..."):
+            model, scaler = train_model(X_train, y_train, model_name, use_scaling=True)
+        
+        preds = model.predict(X_test)
+        metrics_values = evaluate_model(model, X_test, y_test, scaler)
+        results = results.append({"Model": model_name, **metrics_values}, ignore_index=True)
+    
+    st.write(results)
+```
+
+#### Model comparison logic:
+```python
+else:
+    st.subheader("Model Comparison")
+    all_models = ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", "SVM"]
+    metrics = ["rmse", "mae", "mape", "accuracy", "r2"]
+    results = pd.DataFrame(columns=["Model"] + metrics)
+```
+- New section for comparing all models.
+- Initializes empty DataFrame for results.
+
+#### Iterative training and evaluation:
+```python
+for model_name in all_models:
+    with st.spinner(f"Training {model_name}..."):
+        model, scaler = train_model(X_train, y_train, model_name, use_scaling=True)
+    
+    preds = model.predict(X_test)
+    metrics_values = evaluate_model(model, X_test, y_test, scaler)
+    results = results.append({"Model": model_name, **metrics_values}, ignore_index=True)
+```
+- Loops over all model names.
+- Trains each model.
+- Makes predictions on test set.
+- Evaluates metrics.
+- Appends results to DataFrame.
+
+#### Results display:
+```python
+st.write(results)
+```
+- Shows comparison table.
+
+---
+
+### Download Results Button
+
+```python
+csv = df_results.to_csv(index=False)
+st.download_button(
+    label="Download Results",
+    data=csv,
+    file_name=f"{ticker}_stock_predictions.csv",
+    mime="text/csv",
+    key="download-csv"
+)
+```
+
+#### CSV download:
+```python
+csv = df_results.to_csv(index=False)
+```
+- Converts DataFrame to CSV format.
+
+#### `st.download_button(...)`
+- Renders download button.
+
+**Parameters:**
+- `label`: Button text.
+- `data=csv`: CSV data.
+- `file_name`: Suggested file name.
+- `mime`: Content type.
+
+---
+
+## Plots Section
+
+```python
+st.subheader("Plots")
+
+# Feature importance (if applicable)
+if mode == "Single Model" and selected_model in ["Random Forest", "Gradient Boosting", "XGBoost"]:
+    st.write("### Feature Importance")
+    importance = model.feature_importances_ if hasattr(model, "feature_importances_") else None
+    if importance is not None:
+        feature_importance_df = pd.DataFrame({
+            "Feature": X_train.columns,
+            "Importance": importance
+        }).sort_values(by="Importance", ascending=False)
+        
+        st.bar_chart(feature_importance_df.set_index("Feature"))
+
+# Residuals plot
+st.write("### Residuals Plot")
+residuals = y_test - preds
+plt.figure(figsize=(10, 6))
+plt.scatter(preds, residuals)
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("Predicted Values")
+plt.ylabel("Residuals")
+plt.title("Residuals vs Predicted Values")
+plt.grid()
+st.pyplot()
+```
+
+### Components:
+
+#### Feature importance (conditional):
+```python
+if mode == "Single Model" and selected_model in ["Random Forest", "Gradient Boosting", "XGBoost"]:
+    st.write("### Feature Importance")
+    importance = model.feature_importances_ if hasattr(model, "feature_importances_") else None
+    if importance is not None:
+        feature_importance_df = pd.DataFrame({
+            "Feature": X_train.columns,
+            "Importance": importance
+        }).sort_values(by="Importance", ascending=False)
+        
+        st.bar_chart(feature_importance_df.set_index("Feature"))
+```
+- Shows feature importance bar chart.
+- Conditional on model type.
+
+#### Residuals plot:
+```python
+st.write("### Residuals Plot")
+residuals = y_test - preds
+plt.figure(figsize=(10, 6))
+plt.scatter(preds, residuals)
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("Predicted Values")
+plt.ylabel("Residuals")
+plt.title("Residuals vs Predicted Values")
+plt.grid()
+st.pyplot()
+```
+- Scatter plot of residuals.
+- Red dashed line at y=0.
+
+---
+
+## Next-Day Prediction (if applicable)
+
+```python
+st.subheader("Next-Day Prediction")
+
+# Single model mode only
+if mode == "Single Model":
+    with st.spinner(f"Predicting next day with {selected_model}..."):
+        # Use latest available data point
+        latest_data = df_lags.tail(1).drop("target", axis=1)
+        if scaler is not None:
+            latest_data = scaler.transform(latest_data)
+        
+        next_day_pred = model.predict(latest_data)
+        st.write(f"### Predicted Close Price: ${next_day_pred[0]:.2f}")
+```
+
+### Components:
+
+#### Subheader:
+```python
+st.subheader("Next-Day Prediction")
+```
+- Section title.
+
+#### Conditional prediction:
+```python
+if mode == "Single Model":
+    with st.spinner(f"Predicting next day with {selected_model}..."):
+```
+- Only executes in "Single Model" mode.
+
+#### Latest data selection:
+```python
+latest_data = df_lags.tail(1).drop("target", axis=1)
+```
+- Gets most recent row.
+- Drops target column.
+
+#### Scaling (if applicable):
+```python
+if scaler is not None:
+    latest_data = scaler.transform(latest_data)
+```
+- Transforms features using scaler.
+
+#### Next day prediction:
+```python
+next_day_pred = model.predict(latest_data)
+st.write(f"### Predicted Close Price: ${next_day_pred[0]:.2f}")
+```
+- Predicts using trained model.
+- Displays formatted result.
+
+---
+
+## About and Contact
+
+```python
+st.sidebar.markdown("---")
+st.sidebar.subheader("About This App")
+st.sidebar.info(
+    """
+    This app predicts stock prices using historical data and machine learning models.
+    
+    **Models Used:**
+    - Linear Regression
+    - Random Forest
+    - Gradient Boosting
+    - XGBoost
+    - Support Vector Regressor (SVM)
+    
+    **Data Source:** Yahoo Finance (via yfinance library)
+    
+    **Note:** This app is for educational purposes only. 
+    """
+)
+
+st.sidebar.subheader("Contact")
+st.sidebar.info(
+    """
+    Author: Your Name
+    Email: your.email@example.com
+    LinkedIn: [Your Profile](https://www.linkedin.com/in/yourprofile)
+    """
+)
+```
+
+### Components:
+
+#### Sidebar about section:
+```python
+st.sidebar.markdown("---")
+st.sidebar.subheader("About This App")
+st.sidebar.info(
+    """
+    This app predicts stock prices using historical data and machine learning models.
+    
+    **Models Used:**
+    - Linear Regression
+    - Random Forest
+    - Gradient Boosting
+    - XGBoost
+    - Support Vector Regressor (SVM)
+    
+    **Data Source:** Yahoo Finance (via yfinance library)
+    
+    **Note:** This app is for educational purposes only. 
+    """
+)
+```
+
+#### Sidebar contact section:
+```python
+st.sidebar.subheader("Contact")
+st.sidebar.info(
+    """
+    Author: Your Name
+    Email: your.email@example.com
+    LinkedIn: [Your Profile](https://www.linkedin.com/in/yourprofile)
+    """
+)
+```
+- Replace with your details.
+
+---
+
+## End of Document
+
+````

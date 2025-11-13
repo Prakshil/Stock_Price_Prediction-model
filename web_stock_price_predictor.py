@@ -4,6 +4,8 @@ import numpy as np
 import yfinance as yf
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from xgboost import XGBRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
@@ -81,7 +83,7 @@ test_size = st.sidebar.slider("Test Size (%)", 10, 50, 20)
 st.sidebar.header("🤖 Model Selection")
 model_choice = st.sidebar.selectbox(
     "Choose Model",
-    ["Linear Regression", "Random Forest", "Gradient Boosting", "Compare All Models"]
+    ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", "SVM", "Compare All Models"]
 )
 
 
@@ -167,6 +169,36 @@ def train_and_evaluate_model(model_name: str, X_train, X_test, y_train, y_test, 
         X_ts = X_test_scaled if use_scaling else X_test
         model.fit(X_tr, y_train)
         preds = model.predict(X_ts)
+    elif model_name == "XGBoost":
+        model = XGBRegressor(
+            n_estimators=200,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=3,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0
+        )
+        X_tr = X_train_scaled if use_scaling else X_train
+        X_ts = X_test_scaled if use_scaling else X_test
+        model.fit(X_tr, y_train)
+        preds = model.predict(X_ts)
+    elif model_name == "SVM":
+        model = SVR(
+            kernel='rbf',
+            C=100,
+            gamma='scale',
+            epsilon=0.1,
+            cache_size=500
+        )
+        X_tr = X_train_scaled if use_scaling else X_train
+        X_ts = X_test_scaled if use_scaling else X_test
+        model.fit(X_tr, y_train)
+        preds = model.predict(X_ts)
     
     # Calculate metrics
     rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
@@ -193,7 +225,7 @@ if model_choice == "Compare All Models":
     all_results = []
     
     with st.spinner("Training all models..."):
-        for name in ["Linear Regression", "Random Forest", "Gradient Boosting"]:
+        for name in ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", "SVM"]:
             use_scaling = name != "Linear Regression"
             model, preds, metrics = train_and_evaluate_model(
                 name, X_train, X_test, y_train, y_test, use_scaling
@@ -216,8 +248,8 @@ if model_choice == "Compare All Models":
     fig, ax = plt.subplots(figsize=(14, 6))
     ax.plot(y_test.index, y_test, label="Actual", linewidth=2.5, color='black', alpha=0.8)
     
-    colors = ['blue', 'green', 'orange']
-    linestyles = ['--', '-.', ':']
+    colors = ['blue', 'green', 'orange', 'purple', 'red']
+    linestyles = ['--', '-.', ':', '--', '-.']
     
     for i, (name, data) in enumerate(models_data.items()):
         ax.plot(y_test.index, data["predictions"], 
@@ -240,7 +272,7 @@ if model_choice == "Compare All Models":
     latest_X = df_feat.drop("target", axis=1).iloc[-1:].values
     latest_X_scaled = scaler.transform(latest_X)
     
-    pred_cols = st.columns(3)
+    pred_cols = st.columns(5)
     for i, (name, data) in enumerate(models_data.items()):
         if name == "Linear Regression":
             next_pred = data["model"].predict(latest_X)[0]
